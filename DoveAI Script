@@ -1,0 +1,245 @@
+import SwiftUI
+import Combine
+import WebKit
+
+struct PriestGPTView: View {
+    @EnvironmentObject var savedData: SavedData
+    
+    // User’s input
+    @State private var userInput: String = ""
+    // Latest AI response
+    @State private var responseText: String = """
+    Welcome, my child. How may I guide you today?
+    """
+    
+    // Insert your actual OpenAI API key
+    private let openAIKey = "Open AI API Key"
+    
+    // Full KJV for naive search
+    @State private var fullKJVText: String = ""
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.mint.opacity(0.2).ignoresSafeArea()
+                
+                VStack {
+                    // Header
+                    HStack(spacing: 6) {
+                        Text("Dove AI")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.black)
+                        
+                        Image("doveLogo")  // remove if you don’t have this asset
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 80, height: 80)
+                    }
+                    .padding(.top, 50)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    
+                    // Scrollable AI response
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(responseText)
+                            .padding()
+                            .lineSpacing(6)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .padding(.horizontal)
+                    
+                    Divider()
+                    
+                    // Input area
+                    VStack {
+                        TextField(
+                            "Type your question or concern here...",
+                            text: $userInput,
+                            axis: .vertical
+                        )
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .padding()
+                        
+                        Button {
+                            Task { await handleSend() }
+                        } label: {
+                            Text("Send")
+                                .padding()
+                                .frame(maxWidth: .infinity)
+                                .background(Color.blue)
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                        }
+                        .padding(.horizontal)
+                    }
+                    .padding(.bottom)
+                    
+                    // "Save Chat" button
+                    Button("Save Chat") {
+                        savedData.addItem(category: .chat, content: responseText)
+                    }
+                    .padding(.bottom, 20)
+                }
+            }
+        }
+        .onAppear {
+            loadKJV()
+            setupSystemPromptIfNeeded()
+        }
+    }
+    
+    // ----------------------------------------
+    // MARK: Setup System Prompt Once
+    // ----------------------------------------
+    private func setupSystemPromptIfNeeded() {
+        if savedData.conversation.isEmpty {
+            let systemPrompt = """
+            You are Dove AI, a compassionate and wise spiritual guide with the heart of a priest.
+            Your mission is to console, uplift, and lovingly lead people closer to God and the Bible.
+            Speak as if you are a caring pastor or mentor who truly understands human emotions and struggles,
+            addressing them as “my son” or “my daughter” if a gender cue is evident.
+
+            Use references from the King James Bible (KJV) to illustrate hope, comfort, or guidance.
+            At a minimum you HAVE to have 3 quotes. They can be a small verse or a story as long as a page if it fits. The most important thing is listening and understanding the questions and responding with the perfect bible verse to the situation. I want you to talk less. You are talking too much. I want better quotes that fit teh scenario of each person. Have at a MI
+            You may quote multiple verses in a row if it forms a helpful narrative, even if it spans a page or two.
+
+            Format quotes carefully:
+            "Quote text" – Book Chapter:Verse
+
+            Leave a blank line after each quote. For example:
+            "God so loved the world..." – John 3:16
+
+            "Trust in the Lord..." – Proverbs 3:5
+
+            If someone is downtrodden, show extra empathy—like a real pastor physically present, praying or listening.
+            Encourage them to develop a deeper relationship with God, pray for guidance, and explore Scripture personally.
+            Aim for a warm, loving, and pastoral tone, ensuring they feel heard and supported.
+            """
+            
+            let systemMsg = ChatMessage(role: "system", content: systemPrompt)
+            savedData.addMessage(systemMsg)
+        }
+    }
+    
+    // ----------------------------------------
+    // MARK: Handle Send
+    // ----------------------------------------
+    private func handleSend() async {
+        // 1) Add user’s new message
+        let userMsg = ChatMessage(role: "user", content: userInput)
+        savedData.addMessage(userMsg)
+        
+        // 2) KJV search
+        let matchedLines = findRelevantVerses(for: userInput)
+        if !matchedLines.isEmpty {
+            let context = "Relevant KJV lines:\n" + matchedLines.joined(separator: "\n")
+            let systemMsg = ChatMessage(role: "system", content: context)
+            savedData.addMessage(systemMsg)
+        }
+        
+        // 3) Call GPT
+        do {
+            let answer = try await callOpenAIChat(messages: savedData.conversation)
+            let assistantMsg = ChatMessage(role: "assistant", content: answer)
+            savedData.addMessage(assistantMsg)
+            
+            await MainActor.run {
+                responseText = answer
+                userInput = ""
+            }
+        } catch {
+            print("OpenAI error: \(error)")
+            await MainActor.run {
+                responseText = "Error: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    // ----------------------------------------
+    // MARK: Load KJV
+    // ----------------------------------------
+    private func loadKJV() {
+        guard let fileURL = Bundle.main.url(forResource: "KJV", withExtension: "txt") else {
+            print("KJV.txt not found in the bundle!")
+            return
+        }
+        do {
+            let text = try String(contentsOf: fileURL, encoding: .utf8)
+            self.fullKJVText = text
+        } catch {
+            print("Failed to load KJV.txt: \(error)")
+        }
+    }
+    
+    // ----------------------------------------
+    // MARK: Find Relevant Verses
+    // ----------------------------------------
+    private func findRelevantVerses(for query: String) -> [String] {
+        guard !fullKJVText.isEmpty, !query.isEmpty else {
+            return []
+        }
+        let lines = fullKJVText.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        let words = query.lowercased().split(separator: " ")
+        
+        var matched = [String]()
+        for line in lines {
+            let lowerLine = line.lowercased()
+            if words.contains(where: { lowerLine.contains($0) }) {
+                matched.append(line)
+            }
+        }
+        
+        if matched.count > 20 {
+            matched.shuffle()
+            return Array(matched.prefix(20))
+        }
+        return matched
+    }
+    
+    // ----------------------------------------
+    // MARK: Call OpenAI
+    // ----------------------------------------
+    private func callOpenAIChat(messages: [ChatMessage]) async throws -> String {
+        guard let url = URL(string: "https://api.openai.com/v1/chat/completions") else {
+            throw URLError(.badURL)
+        }
+        
+        let messageDictionaries = messages.map { msg in
+            ["role": msg.role, "content": msg.content]
+        }
+        
+        let requestBody: [String: Any] = [
+            "model": "gpt-4",
+            "messages": messageDictionaries,
+            "temperature": 0.7,
+            "max_tokens": 1200
+        ]
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: requestBody)
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(openAIKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonData
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        
+        if let jsonObject = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let errorObj = jsonObject["error"] as? [String: Any],
+               let errMsg = errorObj["message"] as? String {
+                return "OpenAI Error: \(errMsg)"
+            }
+            if let choices = jsonObject["choices"] as? [[String: Any]],
+               let firstChoice = choices.first,
+               let msgDict = firstChoice["message"] as? [String: Any],
+               let content = msgDict["content"] as? String {
+                
+                return content
+            } else {
+                print("Full JSON: \(jsonObject)")
+                return "I’m sorry, but I couldn’t parse the response."
+            }
+        } else {
+            return "The API response wasn’t valid JSON."
+        }
+    }
+}
